@@ -1,0 +1,344 @@
+---
+title: "Regresión Logística — Precio Airbnb"
+author: "Anggelie Velásquez, Anthony Lou, Isabella Obando"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r librerias}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(car)       # VIF / multicolinealidad
+library(corrplot)  # correlación
+library(pROC)      # curva ROC
+library(ROCR)      # curvas de aprendizaje
+```
+
+---
+
+## Carga y preparación base
+
+```{r carga}
+load("listings.RData")
+
+# Limpieza de precio (igual que labs anteriores)
+listings$price <- as.numeric(gsub("[$,]", "", listings$price))
+listings <- listings %>% filter(!is.na(price), price > 0, price < 1000)
+
+# Variables del modelo (las mismas de labs anteriores)
+vars_modelo <- c("price", "accommodates", "bedrooms", "bathrooms",
+                 "beds", "minimum_nights", "number_of_reviews",
+                 "review_scores_rating", "availability_365")
+
+model_df <- listings %>%
+  select(all_of(vars_modelo)) %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+cat("Dimensiones:", nrow(model_df), "x", ncol(model_df), "\n")
+```
+
+---
+
+## Inciso 1 — Variables dicotómicas por categoría de precio
+```{r dicotomicas}
+q1 <- quantile(model_df$price, 0.25)
+q3 <- quantile(model_df$price, 0.75)
+
+model_df <- model_df %>%
+  mutate(
+    precio_categoria = case_when(
+      price <= q1 ~ "Economica",
+      price <= q3 ~ "Intermedia",
+      TRUE        ~ "Cara"
+    ),
+    # Variables dicotómicas
+    es_cara       = ifelse(precio_categoria == "Cara",       1L, 0L),
+    es_intermedia = ifelse(precio_categoria == "Intermedia", 1L, 0L),
+    es_economica  = ifelse(precio_categoria == "Economica",  1L, 0L)
+  )
+
+# Distribución de las tres variables
+cat("Cortes — Q1:", q1, "| Q3:", q3, "\n\n")
+cat("es_cara       — 1:", sum(model_df$es_cara),
+    " | 0:", sum(model_df$es_cara == 0), "\n")
+cat("es_intermedia — 1:", sum(model_df$es_intermedia),
+    " | 0:", sum(model_df$es_intermedia == 0), "\n")
+cat("es_economica  — 1:", sum(model_df$es_economica),
+    " | 0:", sum(model_df$es_economica == 0), "\n")
+```
+
+---
+
+## Inciso 2 — Conjuntos de entrenamiento y prueba
+
+```{r split}
+set.seed(42)
+
+n         <- nrow(model_df)
+train_idx <- sample(seq_len(n), size = floor(0.70 * n))
+
+train_df <- model_df[ train_idx, ]
+test_df  <- model_df[-train_idx, ]
+
+cat("Train:", nrow(train_df), "filas |",
+    "Test:", nrow(test_df), "filas\n")
+cat("Proporción es_cara — Train:", round(mean(train_df$es_cara), 3),
+    "| Test:", round(mean(test_df$es_cara), 3), "\n")
+```
+
+---
+
+## Inciso 3 — Modelo de regresión logística: ¿es cara?
+
+Se construye el modelo para predecir `es_cara` usando validación cruzada (k=10)
+con `caret`, umbral de decisión = 0.5.
+
+```{r modelo_logistico}
+# Preparar factor para caret
+train_df$es_cara_f <- factor(ifelse(train_df$es_cara == 1, "Cara", "NoCara"),
+                              levels = c("NoCara", "Cara"))
+
+# Control de validación cruzada (10-fold, reproducible)
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 10,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(42)
+modelo_log <- train(
+  es_cara_f ~ accommodates + bedrooms + bathrooms + beds +
+              minimum_nights + number_of_reviews +
+              review_scores_rating + availability_365,
+  data      = train_df,
+  method    = "glm",
+  family    = binomial,
+  trControl = ctrl,
+  metric    = "ROC"
+)
+
+summary(modelo_log$finalModel)
+```
+
+### Interpretación del modelo
+
+```{r interpretacion}
+# Odds ratios con intervalos de confianza
+or_df <- exp(cbind(OR = coef(modelo_log$finalModel),
+                   confint(modelo_log$finalModel)))
+print(round(or_df, 4))
+```
+
+---
+
+## Inciso 4 — Análisis del modelo: multicolinealidad, significación y correlación
+
+### Multicolinealidad (VIF)
+
+```{r vif}
+vif_vals <- vif(modelo_log$finalModel)
+vif_df   <- data.frame(Variable = names(vif_vals), VIF = round(vif_vals, 3))
+vif_df$Nivel <- ifelse(vif_df$VIF > 10, "Alta",
+                ifelse(vif_df$VIF > 5,  "Moderada", "Aceptable"))
+
+print(vif_df)
+
+barplot(vif_df$VIF,
+        names.arg = vif_df$Variable,
+        col  = ifelse(vif_df$VIF > 10, "#E05C5C",
+               ifelse(vif_df$VIF > 5,  "#E8A838", "#6DBF8E")),
+        main = "Factor de Inflación de Varianza (VIF)",
+        ylab = "VIF", las = 2, cex.names = 0.75, border = "white")
+abline(h = 5,  col = "#E8A838", lty = 2, lwd = 2)
+abline(h = 10, col = "#E05C5C", lty = 2, lwd = 2)
+legend("topright", legend = c("VIF > 10 (Alta)", "VIF > 5 (Moderada)"),
+       col = c("#E05C5C", "#E8A838"), lty = 2, bty = "n")
+```
+
+### Variables significativas
+
+```{r significacion}
+coef_tbl <- summary(modelo_log$finalModel)$coefficients
+coef_df  <- as.data.frame(coef_tbl)
+coef_df$Significativa <- ifelse(coef_df[, 4] < 0.05, "Sí ✓", "No ✗")
+print(round(coef_df, 4))
+```
+
+### Correlación entre variables predictoras
+
+```{r correlacion}
+vars_pred <- c("accommodates", "bedrooms", "bathrooms", "beds",
+               "minimum_nights", "number_of_reviews",
+               "review_scores_rating", "availability_365")
+
+cor_mat <- cor(train_df[, vars_pred], use = "complete.obs")
+
+corrplot(cor_mat,
+         method = "color", type = "upper", tl.cex = 0.8,
+         addCoef.col = "black", number.cex = 0.7,
+         col  = colorRampPalette(c("#E05C5C", "white", "#5B8DB8"))(200),
+         title = "Correlación entre predictoras", mar = c(0,0,1,0))
+```
+
+### Bondad de ajuste (AIC, pseudo-R²)
+
+```{r bondad_ajuste}
+mod_glm <- modelo_log$finalModel
+
+# Pseudo R² de McFadden
+null_ll <- logLik(glm(es_cara_f ~ 1, data = train_df, family = binomial))
+full_ll <- logLik(mod_glm)
+mcfadden <- as.numeric(1 - (full_ll / null_ll))
+
+cat("AIC del modelo:         ", round(AIC(mod_glm), 2), "\n")
+cat("Pseudo R² (McFadden):   ", round(mcfadden, 4), "\n")
+cat("Log-Likelihood:         ", round(as.numeric(full_ll), 2), "\n")
+```
+---
+
+## Inciso 5 — Evaluación en conjunto de prueba
+
+```{r evaluacion_prueba}
+# Probabilidades predichas (umbral = 0.5)
+test_df$es_cara_f <- factor(ifelse(test_df$es_cara == 1, "Cara", "NoCara"),
+                             levels = c("NoCara", "Cara"))
+
+prob_test  <- predict(modelo_log, newdata = test_df, type = "prob")[, "Cara"]
+pred_test  <- factor(ifelse(prob_test >= 0.5, "Cara", "NoCara"),
+                     levels = c("NoCara", "Cara"))
+
+# Matriz de confusión
+cm <- confusionMatrix(pred_test, test_df$es_cara_f, positive = "Cara")
+print(cm)
+```
+
+```{r metricas_prueba}
+acc  <- cm$overall["Accuracy"]
+prec <- cm$byClass["Precision"]
+rec  <- cm$byClass["Recall"]
+f1   <- cm$byClass["F1"]
+spec <- cm$byClass["Specificity"]
+
+metricas <- data.frame(
+  Métrica = c("Accuracy", "Precision", "Recall (Sensitivity)",
+              "Specificity", "F1-Score"),
+  Valor   = round(c(acc, prec, rec, spec, f1), 4)
+)
+print(metricas)
+```
+
+```{r curva_roc}
+roc_obj <- roc(test_df$es_cara_f, prob_test, levels = c("NoCara", "Cara"))
+auc_val <- auc(roc_obj)
+
+plot(roc_obj,
+     col  = "#5B8DB8", lwd = 2,
+     main = paste0("Curva ROC — Regresión Logística (AUC = ",
+                   round(auc_val, 3), ")"))
+abline(a = 0, b = 1, col = "gray60", lty = 2)
+```
+
+---
+
+## Inciso 6 — Sobreajuste y curvas de aprendizaje
+
+```{r overfitting}
+# Error en entrenamiento
+prob_train <- predict(modelo_log, newdata = train_df, type = "prob")[, "Cara"]
+pred_train <- factor(ifelse(prob_train >= 0.5, "Cara", "NoCara"),
+                     levels = c("NoCara", "Cara"))
+
+acc_train <- mean(pred_train == train_df$es_cara_f)
+acc_test  <- mean(pred_test  == test_df$es_cara_f)
+
+err_train <- 1 - acc_train
+err_test  <- 1 - acc_test
+
+cat("Accuracy — Entrenamiento:", round(acc_train, 4), "\n")
+cat("Accuracy — Prueba:       ", round(acc_test,  4), "\n\n")
+cat("Error  — Entrenamiento:  ", round(err_train, 4), "\n")
+cat("Error  — Prueba:         ", round(err_test,  4), "\n")
+cat("Diferencia de error:     ", round(abs(err_test - err_train), 4), "\n")
+```
+
+```{r curvas_aprendizaje}
+# Curvas de aprendizaje: variando tamaño del training set
+set.seed(42)
+proporciones <- seq(0.10, 1.00, by = 0.10)
+resultados   <- data.frame()
+
+for (p in proporciones) {
+  idx_sub  <- sample(seq_len(nrow(train_df)), size = floor(p * nrow(train_df)))
+  sub_train <- train_df[idx_sub, ]
+
+  mod_sub <- glm(es_cara_f ~ accommodates + bedrooms + bathrooms + beds +
+                   minimum_nights + number_of_reviews +
+                   review_scores_rating + availability_365,
+                 data   = sub_train,
+                 family = binomial)
+
+  # Error train
+  p_tr  <- predict(mod_sub, newdata = sub_train, type = "response")
+  y_tr  <- ifelse(sub_train$es_cara_f == "Cara", 1, 0)
+  e_tr  <- mean((ifelse(p_tr >= 0.5, 1, 0)) != y_tr)
+
+  # Error test
+  p_te  <- predict(mod_sub, newdata = test_df, type = "response")
+  y_te  <- ifelse(test_df$es_cara_f == "Cara", 1, 0)
+  e_te  <- mean((ifelse(p_te >= 0.5, 1, 0)) != y_te)
+
+  resultados <- rbind(resultados, data.frame(
+    proporcion  = p,
+    n_train     = nrow(sub_train),
+    error_train = e_tr,
+    error_test  = e_te
+  ))
+}
+
+# Gráfico
+plot(resultados$n_train, resultados$error_train,
+     type = "b", col = "#5B8DB8", lwd = 2, pch = 16,
+     ylim = range(c(resultados$error_train, resultados$error_test)) * c(0.9, 1.1),
+     xlab = "Tamaño del conjunto de entrenamiento",
+     ylab = "Error de clasificación",
+     main = "Curvas de aprendizaje — Regresión Logística")
+lines(resultados$n_train, resultados$error_test,
+      type = "b", col = "#E05C5C", lwd = 2, pch = 17)
+legend("topright",
+       legend = c("Error Entrenamiento", "Error Prueba"),
+       col    = c("#5B8DB8", "#E05C5C"),
+       lty = 1, pch = c(16, 17), bty = "n")
+```
+
+### Conclusión sobre sobreajuste
+
+```{r conclusion_overfitting}
+diferencia <- abs(err_test - err_train)
+
+if (diferencia < 0.05) {
+  cat("✓ No hay sobreajuste significativo.\n")
+  cat("  La diferencia entre error de prueba y entrenamiento es de",
+      round(diferencia, 4), "(< 0.05).\n")
+  cat("  El modelo generaliza bien a datos nuevos.\n")
+} else if (diferencia < 0.10) {
+  cat("⚠ Sobreajuste leve.\n")
+  cat("  Diferencia de error:", round(diferencia, 4), "\n")
+  cat("  El modelo podría beneficiarse de regularización.\n")
+} else {
+  cat("✗ Sobreajuste detectado.\n")
+  cat("  Diferencia de error:", round(diferencia, 4), "(> 0.10).\n")
+  cat("  Considerar regularización (Ridge/Lasso) o reducir variables.\n")
+}
+```
