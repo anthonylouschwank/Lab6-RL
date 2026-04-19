@@ -22,6 +22,9 @@ library(car)       # VIF / multicolinealidad
 library(corrplot)  # correlación
 library(pROC)      # curva ROC
 library(ROCR)      # curvas de aprendizaje
+library(nnet)
+library(ggplot2)
+library(MLmetrics)
 ```
 
 ---
