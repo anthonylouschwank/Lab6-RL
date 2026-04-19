@@ -342,3 +342,103 @@ if (diferencia < 0.05) {
   cat("  Considerar regularización (Ridge/Lasso) o reducir variables.\n")
 }
 ```
+
+## Inciso 7 – Tuneo del modelo (Regularización)
+
+```{r tuneo_modelo}
+library(glmnet)
+library(caret)
+
+# Preparar matrices para glmnet
+x_train <- model.matrix(es_cara ~ . -1, data = train_df)
+y_train <- train_df$es_cara
+
+x_test <- model.matrix(es_cara ~ . -1, data = test_df)
+y_test <- test_df$es_cara
+
+set.seed(42)
+
+# Validación cruzada para encontrar mejor lambda
+cv_model <- cv.glmnet(x_train, y_train,
+                      family = "binomial",
+                      alpha = 1, # Lasso
+                      nfolds = 10)
+
+# Mejor lambda
+best_lambda <- cv_model$lambda.min
+best_lambda
+
+# Modelo final con regularización
+modelo_tuned <- glmnet(x_train, y_train,
+                       family = "binomial",
+                       alpha = 1,
+                       lambda = best_lambda)
+
+# Predicciones
+prob_tuned <- predict(modelo_tuned, newx = x_test, type = "response")
+pred_tuned <- ifelse(prob_tuned > 0.5, 1, 0)
+```
+
+---
+
+## Inciso 8 – Evaluación del modelo
+
+```{r matriz_confusion}
+library(caret)
+
+prob_tuned <- as.numeric(prob_tuned)
+
+pred_tuned <- ifelse(prob_tuned > 0.5, 1, 0)
+
+# Convertir a factor
+pred_tuned <- factor(pred_tuned, levels = c(0,1))
+y_test_f <- factor(y_test, levels = c(0,1))
+
+# Matriz de confusión
+conf_matrix <- confusionMatrix(pred_tuned, y_test_f)
+conf_matrix
+
+# Métricas
+accuracy <- conf_matrix$overall['Accuracy']
+precision <- conf_matrix$byClass['Precision']
+recall <- conf_matrix$byClass['Recall']
+f1 <- conf_matrix$byClass['F1']
+
+accuracy
+precision
+recall
+f1
+
+# Tiempo de ejecución
+system.time({
+  predict(modelo_tuned, newx = x_test, type = "response")
+})
+
+```
+
+## Inciso 9 – Optimización del umbral de decisión
+
+```{r umbral_youden}
+library(pROC)
+library(caret)
+
+# Curva ROC
+roc_obj <- roc(y_test, prob_tuned)
+
+# Mejor umbral con índice de Youden
+best_threshold <- coords(roc_obj, "best", best.method = "youden")["threshold"]
+best_threshold <- as.numeric(best_threshold)
+
+best_threshold
+
+# Nuevas predicciones
+pred_new <- ifelse(prob_tuned > best_threshold, 1, 0)
+
+# Convertir a factor
+pred_new <- factor(pred_new, levels = c(0,1))
+y_test_f <- factor(y_test, levels = c(0,1))
+
+# Matriz de confusión con nuevo umbral
+conf_matrix_new <- confusionMatrix(pred_new, y_test_f)
+conf_matrix_new
+```
