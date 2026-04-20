@@ -445,3 +445,204 @@ y_test_f <- factor(y_test, levels = c(0,1))
 conf_matrix_new <- confusionMatrix(pred_new, y_test_f)
 conf_matrix_new
 ```
+
+---
+
+## Inciso 10 — Comparación de modelos de clasificación binaria
+
+```{r comparacion_binaria}
+aic_log <- AIC(modelo_log$finalModel)
+bic_log <- BIC(modelo_log$finalModel)
+
+cat("AIC — Regresión Logística:", round(aic_log, 2), "\n")
+cat("BIC — Regresión Logística:", round(bic_log, 2), "\n")
+```
+
+```{r tabla_comparacion}
+comparacion <- data.frame(
+  Modelo      = c("Árbol de Decisión", "Naive Bayes", "KNN (k=15)", "Reg. Logística"),
+  Accuracy    = c(0.7523, 0.7180, 0.7650, 0.8039),
+  Precision   = c(0.5840, 0.5210, 0.6120, 0.7027),
+  Recall      = c(0.4210, 0.5320, 0.3980, 0.3725),
+  Specificity = c(0.8630, 0.7790, 0.8870, 0.9475),
+  F1          = c(0.4890, 0.5265, 0.4820, 0.4869),
+  AIC         = c(NA, NA, NA, round(aic_log, 2)),
+  BIC         = c(NA, NA, NA, round(bic_log, 2))
+)
+
+print(comparacion)
+```
+
+```{r grafico_comparacion}
+colores_comp <- c("#5B8DB8", "#6DBF8E", "#E8A838", "#E05C5C")
+modelos_completos <- comparacion[complete.cases(comparacion[, "Accuracy"]), ]
+
+par(mar = c(7, 5, 4, 2))
+bp <- barplot(
+  modelos_completos$Accuracy,
+  names.arg = modelos_completos$Modelo,
+  col       = colores_comp[seq_len(nrow(modelos_completos))],
+  border    = "white",
+  ylim      = c(0, 1),
+  main      = "Accuracy por modelo — clasificación binaria (es_cara)",
+  ylab      = "Accuracy", las = 2, cex.names = 0.8
+)
+text(bp, modelos_completos$Accuracy + 0.02,
+     labels = round(modelos_completos$Accuracy, 3),
+     cex = 0.85, font = 2)
+```
+
+---
+
+## Inciso 11 — Regresión logística multinomial: Económica / Intermedia / Cara
+
+```{r preparar_multinomial}
+# Seleccionar solo las columnas numéricas necesarias + la variable respuesta
+vars_multi <- c("accommodates", "bedrooms", "bathrooms", "beds",
+                "minimum_nights", "number_of_reviews",
+                "review_scores_rating", "availability_365",
+                "precio_categoria")
+
+train_multi <- train_df[, vars_multi]
+test_multi  <- test_df[,  vars_multi]
+
+# Convertir todo a numérico excepto la variable respuesta
+train_multi <- train_multi %>%
+  mutate(across(-precio_categoria, as.numeric))
+test_multi <- test_multi %>%
+  mutate(across(-precio_categoria, as.numeric))
+
+# Asegurar factor correcto en variable respuesta
+train_multi$precio_categoria <- factor(train_multi$precio_categoria,
+                                        levels = c("Economica", "Intermedia", "Cara"))
+test_multi$precio_categoria  <- factor(test_multi$precio_categoria,
+                                        levels = c("Economica", "Intermedia", "Cara"))
+
+cat("Distribución en train:\n")
+print(table(train_multi$precio_categoria))
+cat("\nDistribución en test:\n")
+print(table(test_multi$precio_categoria))
+```
+
+```{r tuning_multinomial}
+grid_decay <- expand.grid(decay = c(0, 0.001, 0.01, 0.05, 0.1, 0.5, 1))
+
+ctrl_multi <- trainControl(
+  method          = "cv",
+  number          = 10,
+  classProbs      = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(42)
+modelo_multi <- train(
+  precio_categoria ~ .,
+  data      = train_multi,
+  method    = "multinom",
+  trControl = ctrl_multi,
+  tuneGrid  = grid_decay,
+  metric    = "Accuracy",
+  trace     = FALSE
+)
+
+cat("Mejor decay:", modelo_multi$bestTune$decay, "\n")
+plot(modelo_multi, main = "Tuning — Accuracy vs Decay (multinomial)")
+```
+
+```{r summary_multinomial}
+summary(modelo_multi$finalModel)
+```
+
+```{r evaluacion_multinomial_train}
+pred_multi_train <- predict(modelo_multi, newdata = train_multi)
+cm_multi_train   <- confusionMatrix(pred_multi_train, train_multi$precio_categoria)
+cat("=== Matriz de confusión — Entrenamiento ===\n")
+print(cm_multi_train)
+```
+
+```{r evaluacion_multinomial_test}
+pred_multi_test <- predict(modelo_multi, newdata = test_multi)
+cm_multi_test   <- confusionMatrix(pred_multi_test, test_multi$precio_categoria)
+cat("=== Matriz de confusión — Prueba ===\n")
+print(cm_multi_test)
+```
+
+```{r metricas_multinomial}
+acc_multi_train <- cm_multi_train$overall["Accuracy"]
+acc_multi_test  <- cm_multi_test$overall["Accuracy"]
+err_multi_train <- 1 - acc_multi_train
+err_multi_test  <- 1 - acc_multi_test
+
+cat("Accuracy — Entrenamiento:", round(acc_multi_train, 4), "\n")
+cat("Accuracy — Prueba:       ", round(acc_multi_test,  4), "\n")
+cat("Error   — Entrenamiento:", round(err_multi_train, 4), "\n")
+cat("Error   — Prueba:       ", round(err_multi_test,  4), "\n")
+cat("Diferencia de error:    ", round(abs(err_multi_test - err_multi_train), 4), "\n")
+```
+
+```{r matriz_visual}
+cm_df <- as.data.frame(cm_multi_test$table)
+
+ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 5, fontface = "bold") +
+  scale_fill_gradient(low = "white", high = "#5B8DB8") +
+  labs(title = "Matriz de confusión — Multinomial (prueba)",
+       x = "Real", y = "Predicho") +
+  theme_minimal(base_size = 13)
+```
+
+---
+
+## Inciso 12 — Comparación con modelos de clasificación anteriores
+
+```{r tiempo_multinomial}
+set.seed(42)
+t_inicio <- proc.time()
+modelo_tiempo <- train(
+  precio_categoria ~ .,
+  data      = train_multi,
+  method    = "multinom",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid  = expand.grid(decay = modelo_multi$bestTune$decay),
+  metric    = "Accuracy",
+  trace     = FALSE
+)
+t_multi <- (proc.time() - t_inicio)["elapsed"]
+cat("Tiempo regresión logística multinomial:", round(t_multi, 2), "segundos\n")
+```
+
+```{r tabla_final_clasificacion}
+comparacion_clas <- data.frame(
+  Modelo        = c("Árbol de Decisión", "Naive Bayes", "KNN (k=15)",
+                    "Reg. Log. Multinomial"),
+  Accuracy      = c(0.7523, 0.7180, 0.7650, round(acc_multi_test, 4)),
+  Precision     = c(0.5840, 0.5210, 0.6120, round(cm_multi_test$byClass["Class: Cara", "Pos Pred Value"], 4)),
+  Recall        = c(0.4210, 0.5320, 0.3980, round(cm_multi_test$byClass["Class: Cara", "Sensitivity"], 4)),
+  Specificity   = c(0.8630, 0.7790, 0.8870, round(cm_multi_test$byClass["Class: Cara", "Specificity"], 4)),
+  F1            = c(0.4890, 0.5265, 0.4820, round(cm_multi_test$byClass["Class: Cara", "F1"], 4)),
+  Tiempo_seg    = c(NA, NA, NA, round(t_multi, 2))
+)
+
+print(comparacion_clas)
+```
+
+```{r grafico_final}
+colores_final <- c("#5B8DB8", "#6DBF8E", "#E8A838", "#E05C5C")
+modelos_ok <- comparacion_clas[complete.cases(comparacion_clas[, "Accuracy"]), ]
+
+par(mar = c(7, 5, 4, 2))
+bp2 <- barplot(
+  modelos_ok$Accuracy,
+  names.arg = modelos_ok$Modelo,
+  col       = colores_final[seq_len(nrow(modelos_ok))],
+  border    = "white",
+  ylim      = c(0, 1),
+  main      = "Accuracy — comparación final de modelos de clasificación",
+  ylab      = "Accuracy", las = 2, cex.names = 0.75
+)
+text(bp2, modelos_ok$Accuracy + 0.02,
+     labels = round(modelos_ok$Accuracy, 3),
+     cex = 0.85, font = 2)
+```
